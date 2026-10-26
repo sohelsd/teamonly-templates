@@ -47,7 +47,7 @@ Every template is the same small stack, which AI tools get right the first time:
 - `migrations/*.sql`: the database schema (SQLite / D1)
 - `teamonly.json`: the app name
 
-In the API, `c.var.ctx` gives you the signed-in `user`, the app's `db`, `files` and `secrets`. Details in the [docs](https://teamonly.dev/docs?ref=github).
+In the API, `c.var.ctx` gives you the signed-in `user` (with their `roles` in the app), the app's `db`, `files` and `secrets`, and `email` to message coworkers. Scheduled jobs (daily digests, reminders) are declared in `teamonly.json`. Details in the [docs](https://teamonly.dev/docs?ref=github).
 
 ## AI instructions
 
@@ -63,6 +63,6 @@ They also cover moving a Lovable, Bolt or v0 app onto this shape.
 
 [TeamOnly](https://teamonly.dev/?ref=github) hosts the internal tools people build with AI, behind their company login, with a database, file storage and secrets included. Plans start at $19 a month. IT gets a list of every app, who owns it and who can open it.
 
-This repo mirrors the templates in the [`teamonly`](https://www.npmjs.com/package/teamonly) npm package. The templates and AI instructions are MIT licensed: use them however you like.
+This repo mirrors the templates and AI instructions in the [`teamonly`](https://www.npmjs.com/package/teamonly) npm package (0.5.0). The templates and AI instructions are MIT licensed: use them however you like.
 
 Questions: [hello@teamonly.dev](mailto:hello@teamonly.dev)

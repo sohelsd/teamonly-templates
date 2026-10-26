@@ -50,6 +50,9 @@ When the user asks to move, port or convert an app to TeamOnly, keep every scree
 | Supabase, Firebase, Postgres, MySQL, MongoDB, Redis, `better-sqlite3` | `c.var.ctx.db` (D1) |
 | Prisma, Drizzle, TypeORM, Sequelize, Knex | Plain SQL with `ctx.db.prepare(...)` |
 | Auth.js, Clerk, Auth0, Passport, Lucia, JWT, bcrypt, sessions, cookies, login/signup pages, passwords | Nothing. The user is signed in: `c.var.ctx.user` |
+| nodemailer, SMTP, SendGrid, Resend, Postmark | `c.var.ctx.email.send()` (coworkers only) |
+| node-cron, setInterval timers, a cron service | `schedules` in teamonly.json and a `scheduled()` route |
+| A users or roles table to decide who may approve or administer | `ctx.user.roles`, given out with `npx teamonly roles add` |
 | `localStorage` or in-memory arrays as the data store | `ctx.db`. `localStorage` is fine for UI conveniences only (last filter, collapsed panels). |
 | `fs`, writing to disk, `multer`, S3, Cloudinary | `ctx.files` |
 | `dotenv`, `process.env`, hardcoded keys, `VITE_*` keys | `ctx.secrets.get('NAME')` in the worker |
@@ -57,7 +60,7 @@ When the user asks to move, port or convert an app to TeamOnly, keep every scree
 | `sharp`, `canvas`, `puppeteer`, `bcrypt`, any native Node module | Not available. Use a pure JS library or tell the user. |
 | Dockerfile, `vercel.json`, `wrangler deploy`, CI deploys | `npx teamonly deploy` |
 
-**Not supported yet:** sending email, cron or scheduled jobs, WebSockets or live updates, background workers, AI features without an API key. Tell the user plainly (never leave a "Sent" or "Notified" label on something that was not sent), then build the in-app alternative: badge counts, a "Needs your attention" view, a Refresh button, a CSV export. For Slack or Teams notifications use an incoming webhook URL stored as a secret (see "Outside services").
+**Not supported yet:** WebSockets or live updates, background workers, email to people outside the company, AI features without an API key. (Email to coworkers and scheduled jobs are supported: see "Email" and "Scheduled jobs".) Tell the user plainly (never leave a "Sent" or "Notified" label on something that was not sent), then build the in-app alternative: badge counts, a "Needs your attention" view, a Refresh button, a CSV export. For Slack or Teams notifications use an incoming webhook URL stored as a secret (see "Outside services").
 
 If an existing project uses anything above, move it to this shape before adding features.
 
@@ -107,11 +110,13 @@ export default app;
 
 | | What |
 |---|---|
-| `user` | `{ email, name, isOwner }`. Always present. `email` is always lowercase. `isOwner` is true for the person who first deployed the app. |
+| `user` | `{ email, name, isOwner, roles }`. Always present. `email` is always lowercase. `isOwner` is true for the person who first deployed the app. `roles` is this person's roles in the app, like `['approver']` (see "Roles inside the app"). |
 | `app` | `{ org, name, owner }`. `owner` is the owner's email (or `null`). |
 | `db` | D1 database: `prepare(sql).bind(...).all() / .first() / .run()`, `batch([...])` |
 | `files` | `put(key, body, contentType?)`, `get(key)` returns a `Response` or `null`, `delete(key)`, `list(prefix?)` |
 | `secrets` | `get('NAME')` returns `string \| undefined` |
+| `email` | `send({ to, subject, text, html?, replyTo? })` emails coworkers (see "Email") |
+| `schedule` | The job's name when TeamOnly runs a scheduled job, otherwise `undefined` (see "Scheduled jobs") |
 
 ## Database (D1)
 
@@ -172,37 +177,33 @@ npx teamonly access add lee@acme.com
 npx teamonly access everyone
 ```
 
-**Roles inside the app** (admins, approvers, managers) are code. The owner bootstraps them:
-```sql
--- migration: admins the owner manages in the UI; people named in the user's request are seeded
-CREATE TABLE admins (email TEXT PRIMARY KEY, added_by TEXT NOT NULL, added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')));
-INSERT INTO admins (email, added_by) VALUES ('priya@acme.com', 'setup');
+**Roles inside the app** (admins, approvers, managers, finance) live in TeamOnly too. The owner or an admin gives them out on the app's page in the dashboard, or with:
+```sh
+npx teamonly roles add approver priya@acme.com sam@acme.com
+npx teamonly roles remove approver sam@acme.com
+npx teamonly roles                                  # who has which role
 ```
+The app reads them as `ctx.user.roles` and decides what each role may do. Use lowercase names that say what the person does (`approver`, `finance`, `admin`). People named in the user's request: after the first deploy, run `npx teamonly roles add ...` for them, or tell the user to.
 ```ts
 import type { Context } from 'hono';
 
-async function isAdmin(c: Context<TeamOnly>) {
-  const { user, db } = c.var.ctx;
-  if (user.isOwner) return true; // the owner is always an admin
-  return !!(await db.prepare('SELECT 1 FROM admins WHERE email = ?').bind(user.email).first());
-}
+const can = (c: Context<TeamOnly>, role: string) => c.var.ctx.user.isOwner || c.var.ctx.user.roles.includes(role); // the owner can do everything
 
-app.get('/api/me', async (c) => c.json({ ...c.var.ctx.user, isAdmin: await isAdmin(c) }));
+app.get('/api/me', (c) => c.json({ ...c.var.ctx.user, canApprove: can(c, 'approver') }));
 
-app.post('/api/admins', async (c) => {
-  if (!(await isAdmin(c))) return c.json({ error: 'Only admins can do this.' }, 403);
-  const { email } = await c.req.json<{ email?: string }>();
-  if (!email?.includes('@')) return c.json({ error: 'Enter an email address.' }, 400);
-  await c.var.ctx.db.prepare('INSERT OR IGNORE INTO admins (email, added_by) VALUES (?, ?)')
-    .bind(email.trim().toLowerCase(), c.var.ctx.user.email).run();
-  return c.json({ ok: true });
+app.post('/api/expenses/:id/approve', async (c) => {
+  if (!can(c, 'approver')) return c.json({ error: 'Only approvers can approve expenses. Ask the app owner to add you.' }, 403);
+  // ...
 });
 ```
+In the browser, `useUser()` from `teamonly/react` returns `{ email, name, roles }`. For anything the server decides (like `canApprove`), return it from your own `/api/me`. To try a role locally, set `TEAMONLY_DEV_ROLES=approver` in `.dev.vars`.
+
+Templates keep their own `roles` table and People page from before; that keeps working. For new apps and new roles, use `ctx.user.roles`.
 
 - Never use "first visitor becomes admin", "claim this app" or "make me manager" buttons. Anyone could get there first.
 - Check roles and ownership on the server (`WHERE id = ? AND created_by = ?`). Hiding a button is not security.
 - Store `ctx.user.email` in columns like `created_by`, `approved_by`. A `people` table keyed by email is fine for app data (team, manager).
-- In the browser, load roles from your `/api/me`. `useUser()` from `teamonly/react` gives only `{ email, name }`. Sign out link: `href="/__teamonly/logout"`.
+- Sign out link: `href="/__teamonly/logout"`.
 
 ## Front end: `src/client/`
 
@@ -232,6 +233,50 @@ app.get('/api/receipts/:id/file', async (c) => { // download, after checking the
 
 - Metadata in the database, bytes in `ctx.files`. Uploads under 100 MB.
 - If `ctx.files` throws "File storage isn't turned on for this app yet", tell the user exactly that, and offer a fallback such as saving a link to the file (Drive, SharePoint) in a text column. To test locally, uncomment `r2_buckets` in `wrangler.jsonc`.
+
+## Email
+
+`ctx.email.send()` emails coworkers from the app, as "Expenses at Acme". Replies go to the app's owner unless you set `replyTo`. Only addresses at the company's email domains are allowed (the same people who can sign in); anyone else makes the whole send fail, so check before you send.
+```ts
+await c.var.ctx.email.send({
+  to: approver.email,                              // one address or a list (up to 50)
+  subject: `Expense from ${c.var.ctx.user.name}: $${amount}`,
+  text: `${c.var.ctx.user.name} submitted an expense for $${amount}.\n\nReview it: https://${host}/expenses/${id}`,
+});
+```
+- `text` is required; `html` is optional. Put a link back to the app in the text (`new URL(c.req.url).origin`).
+- It throws with a plain message (outside address, too many emails): catch it, and still save the record, so a failed email never loses data. Tell the user what happened.
+- Limits: 100 recipients an hour and 500 a day per app. For many people at once, send one email to a list rather than one each.
+- Locally, nothing is sent: the email is printed in the terminal.
+- Never use nodemailer, SMTP, SendGrid or Resend. Email to people outside the company isn't supported.
+
+## Scheduled jobs
+
+For daily digests, reminders and month-end reports, declare schedules in `teamonly.json` and write a route TeamOnly calls at those times:
+```json
+{
+  "name": "expenses",
+  "timezone": "America/New_York",
+  "schedules": [
+    { "name": "daily-digest", "cron": "0 9 * * 1-5", "path": "/api/cron/daily-digest" }
+  ]
+}
+```
+```ts
+import { scheduled } from 'teamonly/server';
+
+app.post('/api/cron/daily-digest', scheduled(async (c) => {
+  const { db, email } = c.var.ctx;
+  const { results } = await db.prepare("SELECT approver, count(*) AS n FROM expenses WHERE status = 'pending' GROUP BY approver").all<{ approver: string; n: number }>();
+  for (const r of results) await email.send({ to: r.approver, subject: `${r.n} expenses waiting for you`, text: '...' });
+  return c.json({ sent: results.length });
+}));
+```
+- `cron` is five fields (minute hour day-of-month month day-of-week). Jobs run on 5-minute marks, so minutes must be 0, 5, 10 ... 55 (`*/15`, `0,30`). Use `timezone` (an IANA name) so "9am" means the user's 9am; the default is UTC.
+- Always wrap the route in `scheduled(...)`: people who open the URL get a 404. Inside, `c.var.ctx.schedule` is the job's name and `ctx.user` is a stand-in ("Scheduled job"), not a person, with no roles.
+- Keep a job short (well under a minute). Make it safe to run twice (mark rows as reminded) in case a run repeats.
+- Locally, run it by hand: `curl -X POST http://localhost:5173/api/cron/daily-digest -H 'x-teamonly-schedule: daily-digest'`.
+- Schedules change when you deploy. `npx teamonly deploy` prints them; the dashboard shows when each last ran.
 
 ## Secrets and outside services
 
@@ -276,10 +321,11 @@ Sign in once per computer, then `npx teamonly deploy` builds, applies new migrat
 - **If a command says "You're not signed in"**, sign in by email code, which works from your terminal:
   1. Ask the user for their work email (not Gmail or another personal address), then run `npx teamonly login --email THEIR_EMAIL`.
   2. Ask them for the 6-digit code TeamOnly just emailed them, then run `npx teamonly login --code CODE`. Only the user can give you the code; never guess it or look for it.
-  3. If it says their company has no plan yet, show them the plans it printed and ask which one (Builder $19/mo is one builder and 3 apps, Team $249/mo is unlimited). Then run `npx teamonly subscribe --plan PLAN --company "COMPANY"`. It prints a payment link and waits: tell the user to open it and pay. Run it in the background or with a long timeout; if it stops before they pay, run the same command again to keep waiting (it reuses the same link).
+  3. If it says their company doesn't have TeamOnly yet, it offers a free 14-day trial (one builder, up to 3 apps, no card). Tell the user, ask for their company name, then run `npx teamonly trial --company "COMPANY"`. It signs them in right away.
+     If they'd rather pay now, or it says their domain has already had a trial, ask which plan (Builder $19/mo is one builder and 3 apps, Team $249/mo is unlimited) and run `npx teamonly subscribe --plan PLAN --company "COMPANY"`. It prints a payment link and waits: tell the user to open it and pay. Run it in the background or with a long timeout; if it stops before they pay, run the same command again to keep waiting (it reuses the same link).
   4. Then run `npx teamonly deploy` again.
   The user can also run `npx teamonly login` themselves to sign in with their browser. Never work around sign-in: no tokens, environment variables, `wrangler` or other hosts.
-- If deploy is refused for the plan (app limit, no active plan), tell the user the message as printed. Do not rename the app to get around a limit.
+- If deploy is refused for the plan (app limit, trial ended, no active plan), tell the user the message as printed. When a trial has ended, `npx teamonly subscribe --plan builder` (or `team`) keeps the same company, apps and links; it opens a payment page for the user. Do not rename the app or start a new account to get around a limit.
 - **Errors in the live app:** run `npx teamonly logs`, reproduce the problem (or ask the user to), and read the request lines, `console.log` output and exceptions. It streams until Ctrl+C, so run it in the background and stop it by PID when done. Add `console.log` lines to the worker and redeploy if you need more detail.
 - `npx teamonly delete` removes the live app with its database and files. Only run it when the user clearly asks to delete the app; it asks them to type the app name.
 - `npx teamonly whoami` shows the signed-in account, plan and apps.
@@ -292,7 +338,7 @@ Sign in once per computer, then `npx teamonly deploy` builds, applies new migrat
 4. No login or auth code. Identity from `ctx.user.email`; ownership and roles checked in server SQL; no "first visitor is admin".
 5. Migrations: before the first deploy, 0001 holds the real schema (no leftover notes table). After it, only new numbered files. All SQL uses `?`, at most 100 per statement.
 6. No secrets in code. Optional features turn off without their secret. You told the user which `secrets set` and `access` commands to run.
-7. No `fs`, native modules, `listen()`, WebSockets, cron, email or background jobs.
+7. No `fs`, native modules, `listen()`, WebSockets, `node-cron`, nodemailer/SendGrid/Resend or background jobs. Email goes through `ctx.email`, timed work through `schedules` in teamonly.json.
 8. `index.html` `<title>` is the app's name.
 9. `npm run typecheck` and `npm run build` pass, and the main flow works under `npm run dev` (load the page, curl the main `/api` routes).
 
