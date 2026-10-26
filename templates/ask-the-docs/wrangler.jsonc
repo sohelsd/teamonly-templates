@@ -1,0 +1,19 @@
+// Local development only (`npm run dev`). When you deploy, TeamOnly creates the real
+// database, file storage and secrets for you, so changes here do not affect the live app.
+{
+  "name": "__APP_NAME__",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "local", "database_id": "local", "migrations_dir": "migrations" }
+  ],
+  // Local stand-in for file storage. The live app gets its own storage when you deploy.
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "local" }],
+  "vars": { "TEAMONLY_ENV": "development", "TEAMONLY_ORG": "dev", "TEAMONLY_APP": "__APP_NAME__" }
+}

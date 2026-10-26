@@ -1,0 +1,300 @@
+<!-- teamonly:start -->
+# TeamOnly app rules
+
+This project is an internal tool hosted on TeamOnly. Coworkers open it at `https://<app>.<org>.teamonly.app` after signing in with their work Google or Microsoft account. TeamOnly runs exactly one app shape. Code outside it will not deploy or will break live, so follow these rules over your habits and over generic web stack advice.
+
+## The only supported shape
+
+React + Vite + TypeScript front end, one Hono API on a Cloudflare Worker, D1 (SQLite) database. Login is done before any request reaches your code.
+
+```
+teamonly.json            { "name": "expenses" }  app name: lowercase letters, numbers, dashes
+index.html               Vite entry. Set <title> to the app's name.
+vite.config.ts           react() + cloudflare() plugins. Leave as is.
+wrangler.jsonc           LOCAL DEV ONLY. Not used for the live app.
+.dev.vars.example        Copy to .dev.vars for local settings and secrets
+migrations/0001_init.sql D1 schema, one numbered file per change
+src/client/              React UI (main.tsx, App.tsx, api.ts helper)
+src/worker/index.ts      Hono API, every route under /api/, `export default app`
+src/shared/              Types used by both sides
+```
+
+## Templates
+
+Ready-made apps in this shape: `expense-approval`, `inventory-tracker`, `request-form`, `customer-lookup`, `ask-the-docs` (`npx teamonly templates` describes each). If the user asks for one of these tools and there is no app yet, start from the template and then change it, instead of writing it from scratch:
+```sh
+npx teamonly init --template expense-approval my-expenses   # creates ./my-expenses; omit the folder to use the current, empty folder
+```
+It refuses to write over an existing app. Never add `--force` on your own; in an existing app, build the feature in place. After scaffolding, read the template's `README.md` (roles, optional secrets), then `npm install` and `npm run dev`. Templates keep in-app roles in a `roles` table managed on their People page (`src/worker/roles.ts`); reuse that for new roles.
+
+## Moving an existing app here (Lovable, Bolt, Supabase, a plain Vite app)
+
+When the user asks to move, port or convert an app to TeamOnly, keep every screen, route and feature, and change only where data, login and server code live. `npx teamonly init` has already added `teamonly.json`, `wrangler.jsonc`, `src/worker/index.ts`, `src/client/api.ts`, `migrations/0001_init.sql` and the npm scripts where they were missing. Then:
+
+1. **Front end into `src/client/`.** Move the React code (`src/main.tsx`, `App.tsx`, components, pages, hooks, styles, `lib/`) into `src/client/` and point `index.html` at `/src/client/main.tsx`. Update path aliases (`@/` → `src/client/`) in `vite.config.ts` and the tsconfig. Keep the look, components and routes.
+2. **`vite.config.ts`:** add `cloudflare()` from `@cloudflare/vite-plugin` after `react()`. Remove `build.outDir`, `base: './'`, `lovable-tagger` and any Lovable or Bolt build plugin. If Vite is older than 6, upgrade `vite`, `@vitejs/plugin-react` (or `@vitejs/plugin-react-swc`) to current versions.
+3. **TanStack Start (Lovable's current template):** turn off server rendering. Keep TanStack Router as a client router with `@tanstack/router-plugin/vite`, add a normal `index.html` and `main.tsx` that render `<RouterProvider>`, delete the server entry. Each `createServerFn` becomes a Hono route; keep a client function with the same name that calls `api()`, so components don't change.
+4. **Schema:** turn the Supabase tables into `migrations/0001_init.sql`, from `supabase/migrations/*.sql`, or from `src/integrations/supabase/types.ts`, or (no schema in the repo) from the fields the code reads and writes. Postgres to SQLite: `uuid` → `TEXT PRIMARY KEY` filled with `crypto.randomUUID()` in the worker; `timestamptz` → ISO `TEXT`; `boolean` → `INTEGER` 0/1 (convert back with `!!row.done` before returning, if the UI expects true/false); `jsonb` and arrays → `TEXT` with JSON; enums → `TEXT` with a `CHECK`. Triggers that set fields work in SQLite. `user_id` columns become `created_by TEXT` holding the email.
+5. **Login:** delete sign-in, sign-up, password reset, auth context and `supabase.auth` code. `ctx.user` is the signed-in person; `useUser()` in the browser. If the app had its own users or password table, drop the passwords, key people by email, and keep roles (admin, manager) as an email table the owner manages ("Who can open the app, and roles inside it"). Coworkers who are signed in but not added yet get the plainest role (requester, read-only) or a "Ask the owner to add you" screen, never admin.
+6. **Row level security becomes SQL in each route:** `auth.uid() = user_id` becomes `WHERE created_by = ?` bound to `ctx.user.email`; checks on a parent row become `INSERT ... SELECT ... WHERE EXISTS (...)`. One route per action. Never add a generic route that runs SQL or table names sent from the browser.
+7. **Supabase calls become `api()` calls:** `.select('*, items(*)')` → a JOIN (or `json_group_array(json_object(...))`); `.in('id', ids)` → `IN (SELECT value FROM json_each(?))`; several client writes in a row → one route using `db.batch`; `.rpc()` and edge functions → `/api` routes; storage → `ctx.files` with uploads as `FormData` (not base64 in JSON); realtime and presence → a Refresh button. Data kept in `localStorage` moves into tables.
+8. **Clean up:** remove `@supabase/supabase-js`, `supabase/`, `.env` keys and `VITE_SUPABASE_*`. Keys the app needs become secrets.
+9. **Tell the user** in plain words: what changed, what was dropped (email, schedules, live updates), and that **existing data in Supabase does not move automatically** (they can export CSV from Supabase and use an import screen if the app has one). Run `npm run typecheck`, `npm run build` and `npm run dev`, try the main flows, and wait for the user before deploying.
+
+## Never use these
+
+| Do not use | Use |
+|---|---|
+| Express, Fastify, Koa, `http.createServer`, `app.listen` | Hono in `src/worker/index.ts` |
+| Next.js, Remix, TanStack Start (`createServerFn`, `*.server.ts`), Astro, SvelteKit, Nuxt, Vue, Angular | React + Vite in `src/client/` (TanStack Router and react-router are fine as client routers) |
+| Supabase, Firebase, Postgres, MySQL, MongoDB, Redis, `better-sqlite3` | `c.var.ctx.db` (D1) |
+| Prisma, Drizzle, TypeORM, Sequelize, Knex | Plain SQL with `ctx.db.prepare(...)` |
+| Auth.js, Clerk, Auth0, Passport, Lucia, JWT, bcrypt, sessions, cookies, login/signup pages, passwords | Nothing. The user is signed in: `c.var.ctx.user` |
+| `localStorage` or in-memory arrays as the data store | `ctx.db`. `localStorage` is fine for UI conveniences only (last filter, collapsed panels). |
+| `fs`, writing to disk, `multer`, S3, Cloudinary | `ctx.files` |
+| `dotenv`, `process.env`, hardcoded keys, `VITE_*` keys | `ctx.secrets.get('NAME')` in the worker |
+| `axios`, `node-fetch` | Built-in `fetch` |
+| `sharp`, `canvas`, `puppeteer`, `bcrypt`, any native Node module | Not available. Use a pure JS library or tell the user. |
+| Dockerfile, `vercel.json`, `wrangler deploy`, CI deploys | `npx teamonly deploy` |
+
+**Not supported yet:** sending email, cron or scheduled jobs, WebSockets or live updates, background workers, AI features without an API key. Tell the user plainly (never leave a "Sent" or "Notified" label on something that was not sent), then build the in-app alternative: badge counts, a "Needs your attention" view, a Refresh button, a CSV export. For Slack or Teams notifications use an incoming webhook URL stored as a secret (see "Outside services").
+
+If an existing project uses anything above, move it to this shape before adding features.
+
+## The API: `src/worker/index.ts`
+
+```ts
+import { Hono } from 'hono';
+import { teamonly, type TeamOnly } from 'teamonly/server';
+import type { RequestRow } from '../shared/types';
+
+const app = new Hono<TeamOnly>();
+app.use('*', teamonly()); // before every route; sets c.var.ctx
+
+app.get('/api/me', (c) => c.json(c.var.ctx.user)); // { email, name, isOwner }
+
+app.get('/api/requests', async (c) => {
+  const { results } = await c.var.ctx.db.prepare('SELECT * FROM requests ORDER BY id DESC LIMIT 200').all<RequestRow>();
+  return c.json(results);
+});
+
+app.post('/api/requests', async (c) => {
+  const { title } = await c.req.json<{ title?: string }>();
+  if (!title?.trim()) return c.json({ error: 'Title is required.' }, 400);
+  const row = await c.var.ctx.db
+    .prepare("INSERT INTO requests (title, status, created_by) VALUES (?, 'open', ?) RETURNING *")
+    .bind(title.trim(), c.var.ctx.user.email)
+    .first<RequestRow>();
+  return c.json(row, 201);
+});
+
+app.notFound((c) => c.json({ error: 'Not found.' }, 404));
+app.onError((err, c) => {
+  console.error(err);
+  return c.json({ error: 'Something went wrong.' }, 500);
+});
+
+export default app;
+```
+
+- Every API path starts with `/api/`. Everything else serves the React app, and deep links (`/requests/42`) load `index.html` automatically, so react-router and hash routing both work. Never add a worker route returning HTML.
+- `/__teamonly/*` paths belong to TeamOnly. Do not create them.
+- Input: `c.req.json()`, `c.req.parseBody()` (forms, uploads), `c.req.query('q')`, `c.req.param('id')`. Validate on the server.
+- Errors: `c.json({ error: 'Plain sentence for the user.' }, 4xx)`.
+- Identity comes from `ctx.user`, never from values the client sends.
+
+## `c.var.ctx`
+
+| | What |
+|---|---|
+| `user` | `{ email, name, isOwner }`. Always present. `email` is always lowercase. `isOwner` is true for the person who first deployed the app. |
+| `app` | `{ org, name, owner }`. `owner` is the owner's email (or `null`). |
+| `db` | D1 database: `prepare(sql).bind(...).all() / .first() / .run()`, `batch([...])` |
+| `files` | `put(key, body, contentType?)`, `get(key)` returns a `Response` or `null`, `delete(key)`, `list(prefix?)` |
+| `secrets` | `get('NAME')` returns `string \| undefined` |
+
+## Database (D1)
+
+```ts
+const db = c.var.ctx.db;
+const { results } = await db.prepare('SELECT * FROM items WHERE owner = ?').bind(email).all<Item>();
+const item = await db.prepare('SELECT * FROM items WHERE id = ?').bind(id).first<Item>(); // row or null
+const { meta } = await db.prepare('UPDATE items SET done = 1 WHERE id = ?').bind(id).run(); // meta.changes
+```
+
+- Always `?` placeholders with `.bind(...)`. Never join user input into SQL.
+- **At most 100 bound parameters per statement.** For many rows, send one JSON parameter (below).
+- `db.batch([...])` runs statements in order, all or nothing. Use it for any multi-step write.
+- Types: `INTEGER`, `TEXT`, `REAL`. Booleans are 0/1. JSON goes in `TEXT` with `JSON.stringify`.
+- **Dates:** days (due date, day off) as `TEXT 'YYYY-MM-DD'`. Timestamps as ISO UTC: `DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))`, which `new Date(s)` parses. Decide "today" and "this month" in the user's browser timezone unless told otherwise: compute the `YYYY-MM-DD` range in the client and send it as query parameters.
+- Index the columns you filter or sort on.
+
+**Guarded writes** (stock can't go negative, one approval per request):
+```ts
+const [upd] = await db.batch([
+  db.prepare('UPDATE items SET qty = qty - ? WHERE id = ? AND qty >= ?').bind(n, id, n),
+  db.prepare('INSERT INTO movements (item_id, delta, by_email) SELECT ?, ?, ? WHERE changes() > 0').bind(id, -n, email),
+]);
+if (!upd.meta.changes) return c.json({ error: 'Not enough in stock.' }, 409);
+```
+
+**Bulk import / upsert** (CSV import, sync): the client parses the file and sends chunks of about 500 rows.
+```ts
+app.post('/api/items/import', async (c) => {
+  const rows = await c.req.json<{ sku: string; name: string; qty: number }[]>();
+  if (!Array.isArray(rows) || rows.length > 1000) return c.json({ error: 'Send up to 1000 rows at a time.' }, 400);
+  const { meta } = await c.var.ctx.db.prepare(`
+    INSERT INTO items (sku, name, qty)
+    SELECT json_extract(value, '$.sku'), json_extract(value, '$.name'), json_extract(value, '$.qty')
+    FROM json_each(?) WHERE true
+    ON CONFLICT (sku) DO UPDATE SET name = excluded.name, qty = excluded.qty`)
+    .bind(JSON.stringify(rows)).run();
+  return c.json({ imported: meta.changes });
+});
+```
+(`WHERE true` is required by SQLite when `INSERT ... SELECT` has `ON CONFLICT`.)
+
+### Migrations
+
+- The schema lives only in `migrations/`. Each file runs once, in name order, on `npm run dev` and on `npx teamonly deploy`.
+- **Before the app's first deploy:** rewrite `migrations/0001_init.sql` freely. Replace the starter `notes` table with the real schema and remove the notes code.
+- **After a deploy:** never edit, rename or delete an existing migration. Add the next number: `0002_add_priority.sql`. The app has been deployed if `npx teamonly deploy` ever succeeded for it (you ran it, the user shared a teamonly.app link, or says it is live). **If unsure, assume it has been deployed.**
+- Locally, if you rewrote 0001 after it already ran, delete `.wrangler/state` and restart `npm run dev`.
+- SQLite syntax. No `BEGIN`/`COMMIT`. Never create tables at runtime inside a route.
+- Add a column: `ALTER TABLE requests ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal';`. Change a column's type: new table, `INSERT INTO new SELECT ... FROM old`, drop old, rename new.
+
+## Who can open the app, and roles inside it
+
+**Who can open the app** is set in TeamOnly, never in code. By default it is everyone at the company. If the user says only certain people should use it, do not build an email allowlist into the app. After deploying, run (or tell the user to run):
+```sh
+npx teamonly access only priya@acme.com sam@acme.com   # the owner is always included
+npx teamonly access add lee@acme.com
+npx teamonly access everyone
+```
+
+**Roles inside the app** (admins, approvers, managers) are code. The owner bootstraps them:
+```sql
+-- migration: admins the owner manages in the UI; people named in the user's request are seeded
+CREATE TABLE admins (email TEXT PRIMARY KEY, added_by TEXT NOT NULL, added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')));
+INSERT INTO admins (email, added_by) VALUES ('priya@acme.com', 'setup');
+```
+```ts
+import type { Context } from 'hono';
+
+async function isAdmin(c: Context<TeamOnly>) {
+  const { user, db } = c.var.ctx;
+  if (user.isOwner) return true; // the owner is always an admin
+  return !!(await db.prepare('SELECT 1 FROM admins WHERE email = ?').bind(user.email).first());
+}
+
+app.get('/api/me', async (c) => c.json({ ...c.var.ctx.user, isAdmin: await isAdmin(c) }));
+
+app.post('/api/admins', async (c) => {
+  if (!(await isAdmin(c))) return c.json({ error: 'Only admins can do this.' }, 403);
+  const { email } = await c.req.json<{ email?: string }>();
+  if (!email?.includes('@')) return c.json({ error: 'Enter an email address.' }, 400);
+  await c.var.ctx.db.prepare('INSERT OR IGNORE INTO admins (email, added_by) VALUES (?, ?)')
+    .bind(email.trim().toLowerCase(), c.var.ctx.user.email).run();
+  return c.json({ ok: true });
+});
+```
+
+- Never use "first visitor becomes admin", "claim this app" or "make me manager" buttons. Anyone could get there first.
+- Check roles and ownership on the server (`WHERE id = ? AND created_by = ?`). Hiding a button is not security.
+- Store `ctx.user.email` in columns like `created_by`, `approved_by`. A `people` table keyed by email is fine for app data (team, manager).
+- In the browser, load roles from your `/api/me`. `useUser()` from `teamonly/react` gives only `{ email, name }`. Sign out link: `href="/__teamonly/logout"`.
+
+## Front end: `src/client/`
+
+- `api()` in `src/client/api.ts` already adds `/api`: `api('/requests')` calls `/api/requests`. Never write `api('/api/...')`, never `http://localhost`, never a full domain.
+- Show loading, empty and error states. Clean, plain look unless the user asks for a style.
+- Pure front-end libraries are fine (react-router, recharts, date-fns, zod, Tailwind via `@tailwindcss/vite`).
+
+## Files (uploads)
+
+```ts
+app.post('/api/receipts', async (c) => {
+  const file = (await c.req.parseBody()).file;
+  if (!(file instanceof File)) return c.json({ error: 'Choose a file.' }, 400);
+  const key = `receipts/${crypto.randomUUID()}`;
+  await c.var.ctx.files.put(key, file);
+  const row = await c.var.ctx.db.prepare('INSERT INTO receipts (file_key, file_name, uploaded_by) VALUES (?, ?, ?) RETURNING *')
+    .bind(key, file.name, c.var.ctx.user.email).first();
+  return c.json(row, 201);
+});
+
+app.get('/api/receipts/:id/file', async (c) => { // download, after checking the user may see it
+  const r = await c.var.ctx.db.prepare('SELECT file_key FROM receipts WHERE id = ?').bind(c.req.param('id')).first<{ file_key: string }>();
+  return (r && (await c.var.ctx.files.get(r.file_key))) ?? c.json({ error: 'File not found.' }, 404);
+});
+// Browser: const body = new FormData(); body.append('file', f); fetch('/api/receipts', { method: 'POST', body }) (no content-type header)
+```
+
+- Metadata in the database, bytes in `ctx.files`. Uploads under 100 MB.
+- If `ctx.files` throws "File storage isn't turned on for this app yet", tell the user exactly that, and offer a fallback such as saving a link to the file (Drive, SharePoint) in a text column. To test locally, uncomment `r2_buckets` in `wrangler.jsonc`.
+
+## Secrets and outside services
+
+- Never put keys or tokens in code, `src/client/` or `VITE_*` variables. Read them in the worker with `c.var.ctx.secrets.get('NAME')`.
+- Live: tell the user to run `npx teamonly secrets set NAME` (it asks for the value). Never ask them to paste it into the chat. Local: add `NAME=...` to `.dev.vars` and restart.
+- **Optional features turn off when their secret is missing**, instead of failing:
+```ts
+app.get('/api/features', (c) => c.json({ slack: !!c.var.ctx.secrets.get('SLACK_WEBHOOK_URL') }));
+
+// Fire-and-forget after the response; a webhook failure never breaks the request.
+const hook = c.var.ctx.secrets.get('SLACK_WEBHOOK_URL');
+if (hook) {
+  const link = `${new URL(c.req.url).origin}/requests/${row.id}`; // the app's public address
+  c.executionCtx.waitUntil(fetch(hook, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: `${c.var.ctx.user.name} submitted a request: ${link}` }) }).catch(() => {}));
+}
+```
+
+## Cloudflare Workers limits
+
+- No Node server, `listen()`, `fs`, `child_process` or native modules. Use web APIs: `fetch`, `crypto.randomUUID()`, `URL`. `node:crypto` and `node:buffer` work.
+- Requests should finish in a few seconds. Only small `waitUntil` work after the response.
+- Memory is not shared between requests. Anything that must persist goes in `ctx.db` or `ctx.files`.
+
+## Local development
+
+- `npm install`, then `npm run dev`. Use the URL Vite prints (usually http://localhost:5173, but the port can differ). The worker, D1 and migrations run locally.
+- When you need the server while you keep working, run it in the background, save its PID and stop only that PID (never `pkill` or `killall` by name):
+```sh
+npm run db:migrate && (./node_modules/.bin/vite > .wrangler/dev.log 2>&1 & echo $! > .wrangler/dev.pid)
+sleep 5; URL=$(grep -o 'http://localhost:[0-9]*' .wrangler/dev.log | head -1)   # the URL Vite printed
+curl -s "$URL/api/me"
+kill "$(cat .wrangler/dev.pid)"
+```
+- Locally you are `Dev User <dev@example.com>`, who is also the owner. To test as someone else, set `TEAMONLY_DEV_USER="Dana Okafor <dana@acme.com>"` (and `TEAMONLY_DEV_OWNER` for the owner) in `.dev.vars` and restart. Sending `x-teamonly-user-email` headers also works locally, but do not rely on it.
+- `wrangler.jsonc` is for local dev only. Never run `wrangler deploy`.
+
+## Deploy
+
+Sign in once per computer, then `npx teamonly deploy` builds, applies new migrations to the live database and prints the link. Give that link to the user. If it says the address isn't reachable yet, tell the user it can take a few minutes for a new company. The app name comes from `teamonly.json`; changing it creates a different, empty app.
+
+- **If a command says "You're not signed in"**, sign in by email code, which works from your terminal:
+  1. Ask the user for their work email (not Gmail or another personal address), then run `npx teamonly login --email THEIR_EMAIL`.
+  2. Ask them for the 6-digit code TeamOnly just emailed them, then run `npx teamonly login --code CODE`. Only the user can give you the code; never guess it or look for it.
+  3. If it says their company has no plan yet, show them the plans it printed and ask which one (Builder $19/mo is one builder and 3 apps, Team $249/mo is unlimited). Then run `npx teamonly subscribe --plan PLAN --company "COMPANY"`. It prints a payment link and waits: tell the user to open it and pay. Run it in the background or with a long timeout; if it stops before they pay, run the same command again to keep waiting (it reuses the same link).
+  4. Then run `npx teamonly deploy` again.
+  The user can also run `npx teamonly login` themselves to sign in with their browser. Never work around sign-in: no tokens, environment variables, `wrangler` or other hosts.
+- If deploy is refused for the plan (app limit, no active plan), tell the user the message as printed. Do not rename the app to get around a limit.
+- **Errors in the live app:** run `npx teamonly logs`, reproduce the problem (or ask the user to), and read the request lines, `console.log` output and exceptions. It streams until Ctrl+C, so run it in the background and stop it by PID when done. Add `console.log` lines to the worker and redeploy if you need more detail.
+- `npx teamonly delete` removes the live app with its database and files. Only run it when the user clearly asks to delete the app; it asks them to type the app name.
+- `npx teamonly whoami` shows the signed-in account, plan and apps.
+
+## Checklist before every deploy
+
+1. Dependencies: only `react`, `react-dom`, `hono`, `teamonly` and pure JS libraries. Nothing from "Never use".
+2. `src/worker/index.ts`: `new Hono<TeamOnly>()`, `app.use('*', teamonly())` before routes, all routes under `/api/`, `export default app`.
+3. The client calls `/api` through relative paths, and `api()` calls do not repeat `/api`.
+4. No login or auth code. Identity from `ctx.user.email`; ownership and roles checked in server SQL; no "first visitor is admin".
+5. Migrations: before the first deploy, 0001 holds the real schema (no leftover notes table). After it, only new numbered files. All SQL uses `?`, at most 100 per statement.
+6. No secrets in code. Optional features turn off without their secret. You told the user which `secrets set` and `access` commands to run.
+7. No `fs`, native modules, `listen()`, WebSockets, cron, email or background jobs.
+8. `index.html` `<title>` is the app's name.
+9. `npm run typecheck` and `npm run build` pass, and the main flow works under `npm run dev` (load the page, curl the main `/api` routes).
+
+Then run `npx teamonly deploy` (signing in first as described in Deploy if it says you're not signed in) and give the user the printed link.
+<!-- teamonly:end -->

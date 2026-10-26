@@ -1,0 +1,10 @@
+# Copy to .dev.vars for local dev (never commit .dev.vars). Restart `npm run dev` after changes.
+
+# Who you are signed in as locally. Default: Dev User <dev@example.com>
+# TEAMONLY_DEV_USER="Dana Okafor <dana@acme.com>"
+
+# Who owns the app locally (ctx.app.owner, ctx.user.isOwner). Default: the dev user.
+# TEAMONLY_DEV_OWNER="sam@acme.com"
+
+# Optional: post new requests to a Slack channel (incoming webhook URL). Live: npx teamonly secrets set SLACK_WEBHOOK_URL
+# SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...

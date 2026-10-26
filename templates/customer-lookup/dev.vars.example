@@ -1,0 +1,7 @@
+# Copy to .dev.vars for local dev (never commit .dev.vars). Restart `npm run dev` after changes.
+
+# Who you are signed in as locally. Default: Dev User <dev@example.com>
+# TEAMONLY_DEV_USER="Dana Okafor <dana@acme.com>"
+
+# Who owns the app locally (ctx.app.owner, ctx.user.isOwner). Default: the dev user.
+# TEAMONLY_DEV_OWNER="sam@acme.com"

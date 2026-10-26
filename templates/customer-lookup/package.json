@@ -1,0 +1,33 @@
+{
+  "name": "__APP_NAME__",
+  "description": "Search customers by name, email or account number, shared notes, spreadsheet upload to refresh the list.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run db:migrate && vite",
+    "build": "vite build",
+    "db:migrate": "wrangler d1 migrations apply DB --local",
+    "typecheck": "tsc -p src/worker && tsc -p src/client",
+    "deploy": "teamonly deploy"
+  },
+  "dependencies": {
+    "hono": "^4.13.13",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "teamonly": "__TEAMONLY_VERSION__"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.65.0",
+    "@cloudflare/workers-types": "^5.20261025.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "wrangler": "^4.152.0"
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "workerd": true
+  }
+}
